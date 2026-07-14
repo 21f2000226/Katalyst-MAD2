@@ -1,0 +1,1317 @@
+# Katalyst Placement Portal V2 — OpenAPI 3.0
+# Flask JSON API (JWT). Vue SPA is separate; this file documents /api and /health only.
+openapi: 3.0.3
+
+info:
+  title: Katalyst Placement Portal API
+  description: |
+    Decoupled Flask JSON API for Katalyst V2.
+
+    - Auth: `Authorization: Bearer <access_token>` (JWT)
+    - Roles: `admin`, `student`, `company` (blacklisted users get 403)
+    - UI wording uses "drives"; API resources use `job_positions`
+    - Errors: `{ "error", "message", "status" }`
+  version: 2.0.0
+  contact:
+    name: Deva Vasista
+    email: 21f2000226@ds.study.iitm.ac.in
+
+servers:
+  - url: http://127.0.0.1:3000
+    description: Local Flask API (`cd backend && python app.py`)
+
+tags:
+  - name: Health
+    description: Liveness probes
+  - name: Auth
+    description: Register, login, me, refresh
+  - name: Public
+    description: No login required (Redis-cached reads)
+  - name: Admin
+    description: Institute admin (JWT + role admin)
+  - name: Company
+    description: Company user (JWT + role company)
+  - name: Student
+    description: Student user (JWT + role student)
+  - name: Jobs
+    description: Celery task triggers and CSV export
+
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: Access token from POST /api/auth/login
+    RefreshAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: Refresh token from login (use only on /api/auth/refresh)
+
+  schemas:
+    Error:
+      type: object
+      required: [error, message, status]
+      properties:
+        error: { type: string, example: Bad Request }
+        message: { type: string }
+        status: { type: integer, example: 400 }
+
+    User:
+      type: object
+      properties:
+        id: { type: integer }
+        username: { type: string }
+        email: { type: string, format: email }
+        role:
+          type: string
+          enum: [admin, student, company, blacklisted]
+        created_at: { type: string, format: date-time }
+        student: { $ref: "#/components/schemas/Student" }
+        company: { $ref: "#/components/schemas/Company" }
+
+    Student:
+      type: object
+      properties:
+        id: { type: integer }
+        user_id: { type: integer }
+        full_name: { type: string }
+        phone: { type: string, nullable: true }
+        resume_path: { type: string, nullable: true }
+        cgpa: { type: number, format: float, nullable: true }
+        graduation_year: { type: integer, nullable: true }
+        skills: { type: string, nullable: true }
+        notify_deadlines: { type: boolean }
+        created_at: { type: string, format: date-time }
+        user: { $ref: "#/components/schemas/User" }
+
+    Company:
+      type: object
+      properties:
+        id: { type: integer }
+        user_id: { type: integer }
+        name: { type: string }
+        website: { type: string, nullable: true }
+        hr_contact: { type: string, nullable: true }
+        industry: { type: string, nullable: true }
+        approval_status:
+          type: string
+          enum: [pending, approved, rejected]
+        created_at: { type: string, format: date-time }
+        user: { $ref: "#/components/schemas/User" }
+
+    JobPosition:
+      type: object
+      description: Placement drive (UI name)
+      properties:
+        id: { type: integer }
+        company_id: { type: integer }
+        title: { type: string }
+        description: { type: string, nullable: true }
+        requirements: { type: string, nullable: true }
+        min_cgpa:
+          type: number
+          format: float
+          nullable: true
+          description: NULL means no CGPA cutoff
+        salary_min: { type: integer, nullable: true }
+        salary_max: { type: integer, nullable: true }
+        deadline: { type: string, format: date-time, nullable: true }
+        status:
+          type: string
+          enum: [active, closed]
+        approval_status:
+          type: string
+          enum: [pending, approved, rejected]
+        created_at: { type: string, format: date-time }
+        company: { $ref: "#/components/schemas/Company" }
+
+    Application:
+      type: object
+      properties:
+        id: { type: integer }
+        student_id: { type: integer }
+        job_position_id: { type: integer }
+        status:
+          type: string
+          enum: [applied, shortlisted, selected, rejected]
+        interview_at: { type: string, format: date-time, nullable: true }
+        interview_notes: { type: string, nullable: true }
+        applied_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+        student: { $ref: "#/components/schemas/Student" }
+        job_position: { $ref: "#/components/schemas/JobPosition" }
+
+    Placement:
+      type: object
+      properties:
+        id: { type: integer }
+        application_id: { type: integer }
+        student_id: { type: integer }
+        company_id: { type: integer }
+        salary: { type: number, format: float, description: Package in LPA }
+        joining_date: { type: string, format: date, nullable: true }
+        placed_at: { type: string, format: date-time }
+        created_at: { type: string, format: date-time }
+        student_name: { type: string }
+        company_name: { type: string }
+        job_title: { type: string }
+
+    JobPositionInput:
+      type: object
+      properties:
+        title: { type: string }
+        description: { type: string }
+        requirements: { type: string }
+        min_cgpa: { type: number, format: float, nullable: true }
+        salary_min: { type: integer, nullable: true }
+        salary_max: { type: integer, nullable: true }
+        deadline:
+          type: string
+          description: YYYY-MM-DD or ISO datetime
+      required: [title]
+
+    TaskQueued:
+      type: object
+      properties:
+        message: { type: string }
+        task_id: { type: string }
+        delivery: { type: string, enum: [download, email, both] }
+
+    TaskStatus:
+      type: object
+      properties:
+        task_id: { type: string }
+        state:
+          type: string
+          enum: [PENDING, STARTED, SUCCESS, FAILURE, RETRY]
+        result: { type: object, additionalProperties: true }
+        error: { type: string }
+
+  responses:
+    BadRequest:
+      description: Invalid input
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    Unauthorized:
+      description: Missing or invalid JWT
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    Forbidden:
+      description: Wrong role or blacklisted
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    NotFound:
+      description: Resource not found
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    Conflict:
+      description: Duplicate or invalid state
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+
+paths:
+  /health:
+    get:
+      tags: [Health]
+      summary: API health check
+      security: []
+      responses:
+        "200":
+          description: Service is up
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, example: ok }
+                  service: { type: string, example: katalyst-api }
+
+  /api/cache/health:
+    get:
+      tags: [Health]
+      summary: Redis / Flask-Caching health
+      security: []
+      responses:
+        "200":
+          description: Redis reachable
+        "503":
+          description: Redis error
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  # ---------- Auth ----------
+  /api/auth/login:
+    post:
+      tags: [Auth]
+      summary: Login and receive JWT tokens
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [password]
+              properties:
+                username: { type: string, description: Username or omit if using email }
+                email: { type: string, format: email }
+                password: { type: string, format: password }
+      responses:
+        "200":
+          description: Tokens and user
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  access_token: { type: string }
+                  refresh_token: { type: string }
+                  token_type: { type: string, example: Bearer }
+                  user: { $ref: "#/components/schemas/User" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /api/auth/register:
+    post:
+      tags: [Auth]
+      summary: Register as student or company
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [role, username, email, password]
+              properties:
+                role: { type: string, enum: [student, company] }
+                username: { type: string }
+                email: { type: string, format: email }
+                password: { type: string, format: password }
+                password_confirm: { type: string }
+                full_name: { type: string, description: Required for student }
+                phone: { type: string }
+                cgpa: { type: number }
+                graduation_year: { type: integer }
+                skills: { type: string }
+                company_name: { type: string, description: Required for company }
+                website: { type: string }
+                hr_contact: { type: string }
+                industry: { type: string }
+      responses:
+        "201":
+          description: Registered
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message: { type: string }
+                  user: { $ref: "#/components/schemas/User" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "409": { $ref: "#/components/responses/Conflict" }
+
+  /api/auth/me:
+    get:
+      tags: [Auth]
+      summary: Current authenticated user
+      security: [{ BearerAuth: [] }]
+      responses:
+        "200":
+          description: Profile
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  user: { $ref: "#/components/schemas/User" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /api/auth/refresh:
+    post:
+      tags: [Auth]
+      summary: Issue a new access token
+      security: [{ RefreshAuth: [] }]
+      responses:
+        "200":
+          description: New access token
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  access_token: { type: string }
+                  token_type: { type: string, example: Bearer }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  # ---------- Public ----------
+  /api/public/job-positions:
+    get:
+      tags: [Public]
+      summary: List approved active drives
+      security: []
+      parameters:
+        - name: q
+          in: query
+          schema: { type: string }
+          description: Search title / company / keywords
+      responses:
+        "200":
+          description: Job list
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  job_positions:
+                    type: array
+                    items: { $ref: "#/components/schemas/JobPosition" }
+                  search_q: { type: string }
+
+  /api/public/job-positions/{job_id}:
+    get:
+      tags: [Public]
+      summary: Public drive detail
+      security: []
+      parameters:
+        - name: job_id
+          in: path
+          required: true
+          schema: { type: integer }
+      responses:
+        "200":
+          description: Drive
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  job_position: { $ref: "#/components/schemas/JobPosition" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /api/public/companies/{company_id}:
+    get:
+      tags: [Public]
+      summary: Public approved company + active drives
+      security: []
+      parameters:
+        - name: company_id
+          in: path
+          required: true
+          schema: { type: integer }
+      responses:
+        "200":
+          description: Company and jobs
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  company: { $ref: "#/components/schemas/Company" }
+                  job_positions:
+                    type: array
+                    items: { $ref: "#/components/schemas/JobPosition" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  # ---------- Admin ----------
+  /api/admin/dashboard:
+    get:
+      tags: [Admin]
+      summary: Admin dashboard aggregates
+      security: [{ BearerAuth: [] }]
+      parameters:
+        - name: q
+          in: query
+          schema: { type: string }
+      responses:
+        "200":
+          description: Stats and entity lists
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  stats: { type: object, additionalProperties: true }
+                  pending_companies:
+                    type: array
+                    items: { $ref: "#/components/schemas/Company" }
+                  pending_job_positions:
+                    type: array
+                    items: { $ref: "#/components/schemas/JobPosition" }
+                  students:
+                    type: array
+                    items: { $ref: "#/components/schemas/Student" }
+                  companies:
+                    type: array
+                    items: { $ref: "#/components/schemas/Company" }
+                  job_positions:
+                    type: array
+                    items: { $ref: "#/components/schemas/JobPosition" }
+                  recent_applications:
+                    type: array
+                    items: { $ref: "#/components/schemas/Application" }
+                  search_q: { type: string }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /api/admin/placements:
+    get:
+      tags: [Admin]
+      summary: List all confirmed placements
+      security: [{ BearerAuth: [] }]
+      responses:
+        "200":
+          description: Placements
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  placements:
+                    type: array
+                    items: { $ref: "#/components/schemas/Placement" }
+
+  /api/admin/students:
+    post:
+      tags: [Admin]
+      summary: Create student account
+      security: [{ BearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [username, email, password, full_name]
+              properties:
+                username: { type: string }
+                email: { type: string }
+                password: { type: string }
+                full_name: { type: string }
+                phone: { type: string }
+                cgpa: { type: number }
+                graduation_year: { type: integer }
+                skills: { type: string }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message: { type: string }
+                  student: { $ref: "#/components/schemas/Student" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+
+  /api/admin/students/{student_id}:
+    get:
+      tags: [Admin]
+      summary: Student detail and applications
+      security: [{ BearerAuth: [] }]
+      parameters:
+        - name: student_id
+          in: path
+          required: true
+          schema: { type: integer }
+      responses:
+        "200":
+          description: Detail
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  student: { $ref: "#/components/schemas/Student" }
+                  applications:
+                    type: array
+                    items: { $ref: "#/components/schemas/Application" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    delete:
+      tags: [Admin]
+      summary: Delete student and linked user
+      security: [{ BearerAuth: [] }]
+      parameters:
+        - name: student_id
+          in: path
+          required: true
+          schema: { type: integer }
+      responses:
+        "200":
+          description: Deleted
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /api/admin/students/{student_id}/blacklist:
+    post:
+      tags: [Admin]
+      summary: Blacklist student
+      security: [{ BearerAuth: [] }]
+      parameters:
+        - name: student_id
+          in: path
+          required: true
+          schema: { type: integer }
+      responses:
+        "200":
+          description: Blacklisted
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message: { type: string }
+                  student: { $ref: "#/components/schemas/Student" }
+
+  /api/admin/students/{student_id}/unblacklist:
+    post:
+      tags: [Admin]
+      summary: Re-enable blacklisted student
+      security: [{ BearerAuth: [] }]
+      parameters:
+        - name: student_id
+          in: path
+          required: true
+          schema: { type: integer }
+      responses:
+        "200":
+          description: Re-enabled
+        "400": { $ref: "#/components/responses/BadRequest" }
+
+  /api/admin/companies:
+    post:
+      tags: [Admin]
+      summary: Create company (auto-approved)
+      security: [{ BearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [username, email, password, company_name]
+              properties:
+                username: { type: string }
+                email: { type: string }
+                password: { type: string }
+                company_name: { type: string }
+                website: { type: string }
+                hr_contact: { type: string }
+                industry: { type: string }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message: { type: string }
+                  company: { $ref: "#/components/schemas/Company" }
+
+  /api/admin/companies/{company_id}:
+    get:
+      tags: [Admin]
+      summary: Company detail, drives, and light stats
+      security: [{ BearerAuth: [] }]
+      parameters:
+        - name: company_id
+          in: path
+          required: true
+          schema: { type: integer }
+      responses:
+        "200":
+          description: Detail
+        "404": { $ref: "#/components/responses/NotFound" }
+    delete:
+      tags: [Admin]
+      summary: Delete company and linked user
+      security: [{ BearerAuth: [] }]
+      parameters:
+        - name: company_id
+          in: path
+          required: true
+          schema: { type: integer }
+      responses:
+        "200":
+          description: Deleted
+
+  /api/admin/companies/{company_id}/approve:
+    post:
+      tags: [Admin]
+      summary: Approve company
+      security: [{ BearerAuth: [] }]
+      parameters:
+        - name: company_id
+          in: path
+          required: true
+          schema: { type: integer }
+      responses:
+        "200":
+          description: Approved
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message: { type: string }
+                  company: { $ref: "#/components/schemas/Company" }
+
+  /api/admin/companies/{company_id}/reject:
+    post:
+      tags: [Admin]
+      summary: Reject company
+      security: [{ BearerAuth: [] }]
+      parameters:
+        - name: company_id
+          in: path
+          required: true
+          schema: { type: integer }
+      responses:
+        "200":
+          description: Rejected
+
+  /api/admin/companies/{company_id}/blacklist:
+    post:
+      tags: [Admin]
+      summary: Blacklist company user
+      security: [{ BearerAuth: [] }]
+      parameters:
+        - name: company_id
+          in: path
+          required: true
+          schema: { type: integer }
+      responses:
+        "200":
+          description: Blacklisted
+
+  /api/admin/companies/{company_id}/unblacklist:
+    post:
+      tags: [Admin]
+      summary: Re-enable company (sets approval pending)
+      security: [{ BearerAuth: [] }]
+      parameters:
+        - name: company_id
+          in: path
+          required: true
+          schema: { type: integer }
+      responses:
+        "200":
+          description: Re-enabled
+        "400": { $ref: "#/components/responses/BadRequest" }
+
+  /api/admin/job-positions:
+    post:
+      tags: [Admin]
+      summary: Create drive for a company (auto-approved)
+      security: [{ BearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - $ref: "#/components/schemas/JobPositionInput"
+                - type: object
+                  required: [company_id, title]
+                  properties:
+                    company_id: { type: integer }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message: { type: string }
+                  job_position: { $ref: "#/components/schemas/JobPosition" }
+
+  /api/admin/job-positions/{job_id}:
+    get:
+      tags: [Admin]
+      summary: Drive detail and applicants
+      security: [{ BearerAuth: [] }]
+      parameters:
+        - name: job_id
+          in: path
+          required: true
+          schema: { type: integer }
+      responses:
+        "200":
+          description: Detail with stats and applications
+        "404": { $ref: "#/components/responses/NotFound" }
+    delete:
+      tags: [Admin]
+      summary: Delete drive
+      security: [{ BearerAuth: [] }]
+      parameters:
+        - name: job_id
+          in: path
+          required: true
+          schema: { type: integer }
+      responses:
+        "200":
+          description: Deleted
+
+  /api/admin/job-positions/{job_id}/approve:
+    post:
+      tags: [Admin]
+      summary: Approve drive
+      security: [{ BearerAuth: [] }]
+      parameters:
+        - name: job_id
+          in: path
+          required: true
+          schema: { type: integer }
+      responses:
+        "200":
+          description: Approved
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message: { type: string }
+                  job_position: { $ref: "#/components/schemas/JobPosition" }
+
+  /api/admin/job-positions/{job_id}/reject:
+    post:
+      tags: [Admin]
+      summary: Reject drive
+      security: [{ BearerAuth: [] }]
+      parameters:
+        - name: job_id
+          in: path
+          required: true
+          schema: { type: integer }
+      responses:
+        "200":
+          description: Rejected
+
+  # ---------- Company ----------
+  /api/company/dashboard:
+    get:
+      tags: [Company]
+      summary: Company dashboard
+      security: [{ BearerAuth: [] }]
+      responses:
+        "200":
+          description: Company, stats, drives by approval bucket
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  company: { $ref: "#/components/schemas/Company" }
+                  stats: { type: object, additionalProperties: true }
+                  approved_job_positions:
+                    type: array
+                    items: { $ref: "#/components/schemas/JobPosition" }
+                  pending_job_positions:
+                    type: array
+                    items: { $ref: "#/components/schemas/JobPosition" }
+                  rejected_job_positions:
+                    type: array
+                    items: { $ref: "#/components/schemas/JobPosition" }
+
+  /api/company/profile:
+    get:
+      tags: [Company]
+      summary: Get company profile
+      security: [{ BearerAuth: [] }]
+      responses:
+        "200":
+          description: Profile
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  company: { $ref: "#/components/schemas/Company" }
+    put:
+      tags: [Company]
+      summary: Update company profile
+      security: [{ BearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name: { type: string }
+                company_name: { type: string }
+                website: { type: string }
+                hr_contact: { type: string }
+                industry: { type: string }
+      responses:
+        "200":
+          description: Updated
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message: { type: string }
+                  company: { $ref: "#/components/schemas/Company" }
+
+  /api/company/job-positions:
+    post:
+      tags: [Company]
+      summary: Create drive (pending admin approval)
+      security: [{ BearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/JobPositionInput" }
+      responses:
+        "201":
+          description: Submitted
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message: { type: string }
+                  job_position: { $ref: "#/components/schemas/JobPosition" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /api/company/job-positions/{job_id}:
+    get:
+      tags: [Company]
+      summary: Own drive detail and applications
+      security: [{ BearerAuth: [] }]
+      parameters:
+        - name: job_id
+          in: path
+          required: true
+          schema: { type: integer }
+      responses:
+        "200":
+          description: Drive and applicants
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  job_position: { $ref: "#/components/schemas/JobPosition" }
+                  applications:
+                    type: array
+                    items: { $ref: "#/components/schemas/Application" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    put:
+      tags: [Company]
+      summary: Edit own drive (re-pends if previously approved)
+      security: [{ BearerAuth: [] }]
+      parameters:
+        - name: job_id
+          in: path
+          required: true
+          schema: { type: integer }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/JobPositionInput" }
+      responses:
+        "200":
+          description: Updated
+        "404": { $ref: "#/components/responses/NotFound" }
+    delete:
+      tags: [Company]
+      summary: Delete own drive
+      security: [{ BearerAuth: [] }]
+      parameters:
+        - name: job_id
+          in: path
+          required: true
+          schema: { type: integer }
+      responses:
+        "200":
+          description: Deleted
+
+  /api/company/job-positions/{job_id}/toggle:
+    post:
+      tags: [Company]
+      summary: Close active drive, or request reopen (pending approval)
+      security: [{ BearerAuth: [] }]
+      parameters:
+        - name: job_id
+          in: path
+          required: true
+          schema: { type: integer }
+      responses:
+        "200":
+          description: Toggled
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message: { type: string }
+                  job_position: { $ref: "#/components/schemas/JobPosition" }
+
+  /api/company/applications/{application_id}/status:
+    patch:
+      tags: [Company]
+      summary: Shortlist, reject, or select an applicant
+      description: |
+        Selecting a student creates a Placement (`salary` required, `joining_date` optional).
+        Shortlisting may email the student (MailHog locally) when SMTP is configured.
+      security: [{ BearerAuth: [] }]
+      parameters:
+        - name: application_id
+          in: path
+          required: true
+          schema: { type: integer }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [status]
+              properties:
+                status:
+                  type: string
+                  enum: [applied, shortlisted, selected, rejected]
+                interview_at:
+                  type: string
+                  description: datetime-local / ISO; used when shortlisting
+                interview_notes: { type: string }
+                salary:
+                  type: number
+                  description: Required when status is selected (LPA)
+                joining_date:
+                  type: string
+                  format: date
+      responses:
+        "200":
+          description: Status updated
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message: { type: string }
+                  emailed: { type: boolean }
+                  application: { $ref: "#/components/schemas/Application" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /api/company/students/{student_id}/resume:
+    get:
+      tags: [Company]
+      summary: Download resume of a student who applied to this company
+      security: [{ BearerAuth: [] }]
+      parameters:
+        - name: student_id
+          in: path
+          required: true
+          schema: { type: integer }
+      responses:
+        "200":
+          description: Resume file
+          content:
+            application/pdf: { schema: { type: string, format: binary } }
+            application/msword: { schema: { type: string, format: binary } }
+            application/vnd.openxmlformats-officedocument.wordprocessingml.document:
+              schema: { type: string, format: binary }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  # ---------- Student ----------
+  /api/student/dashboard:
+    get:
+      tags: [Student]
+      summary: Student dashboard
+      security: [{ BearerAuth: [] }]
+      responses:
+        "200":
+          description: Available drives, applications, placement
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  student: { $ref: "#/components/schemas/Student" }
+                  available_job_positions:
+                    type: array
+                    items: { $ref: "#/components/schemas/JobPosition" }
+                  applied_job_position_ids:
+                    type: array
+                    items: { type: integer }
+                  applications:
+                    type: array
+                    items: { $ref: "#/components/schemas/Application" }
+                  placement: { $ref: "#/components/schemas/Placement" }
+
+  /api/student/profile:
+    get:
+      tags: [Student]
+      summary: Get student profile
+      security: [{ BearerAuth: [] }]
+      responses:
+        "200":
+          description: Profile
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  student: { $ref: "#/components/schemas/Student" }
+    put:
+      tags: [Student]
+      summary: Update student profile
+      security: [{ BearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [full_name]
+              properties:
+                full_name: { type: string }
+                phone: { type: string }
+                skills: { type: string }
+                cgpa: { type: number }
+                graduation_year: { type: integer }
+                notify_deadlines: { type: boolean }
+      responses:
+        "200":
+          description: Updated
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message: { type: string }
+                  student: { $ref: "#/components/schemas/Student" }
+
+  /api/student/applications:
+    post:
+      tags: [Student]
+      summary: Apply to an open approved drive
+      description: Rejects if student CGPA is below drive `min_cgpa`, or CGPA missing when a cutoff exists.
+      security: [{ BearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [job_position_id]
+              properties:
+                job_position_id: { type: integer }
+      responses:
+        "201":
+          description: Applied
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message: { type: string }
+                  application: { $ref: "#/components/schemas/Application" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/Conflict" }
+
+  /api/student/applications/{application_id}:
+    delete:
+      tags: [Student]
+      summary: Withdraw application (status must be applied)
+      security: [{ BearerAuth: [] }]
+      parameters:
+        - name: application_id
+          in: path
+          required: true
+          schema: { type: integer }
+      responses:
+        "200":
+          description: Withdrawn
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /api/student/companies/{company_id}:
+    get:
+      tags: [Student]
+      summary: View approved company and its open drives
+      security: [{ BearerAuth: [] }]
+      parameters:
+        - name: company_id
+          in: path
+          required: true
+          schema: { type: integer }
+      responses:
+        "200":
+          description: Company detail
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /api/student/job-positions/{job_id}:
+    get:
+      tags: [Student]
+      summary: Drive detail with CGPA eligibility flags
+      security: [{ BearerAuth: [] }]
+      parameters:
+        - name: job_id
+          in: path
+          required: true
+          schema: { type: integer }
+      responses:
+        "200":
+          description: Drive + eligibility
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  job_position: { $ref: "#/components/schemas/JobPosition" }
+                  already_applied: { type: boolean }
+                  student_cgpa: { type: number, nullable: true }
+                  eligible: { type: boolean }
+                  eligibility_message: { type: string }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /api/student/resume:
+    post:
+      tags: [Student]
+      summary: Upload resume (PDF / DOC / DOCX)
+      security: [{ BearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [resume]
+              properties:
+                resume:
+                  type: string
+                  format: binary
+      responses:
+        "200":
+          description: Uploaded
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message: { type: string }
+                  resume_path: { type: string }
+        "400": { $ref: "#/components/responses/BadRequest" }
+    get:
+      tags: [Student]
+      summary: View or download own resume
+      security: [{ BearerAuth: [] }]
+      responses:
+        "200":
+          description: Resume file
+          content:
+            application/pdf: { schema: { type: string, format: binary } }
+        "404": { $ref: "#/components/responses/NotFound" }
+    delete:
+      tags: [Student]
+      summary: Delete own resume
+      security: [{ BearerAuth: [] }]
+      responses:
+        "200":
+          description: Deleted
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  # ---------- Jobs / Celery ----------
+  /api/jobs/tasks/{task_id}:
+    get:
+      tags: [Jobs]
+      summary: Poll Celery task state
+      security: [{ BearerAuth: [] }]
+      parameters:
+        - name: task_id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: Task status
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TaskStatus" }
+
+  /api/jobs/exports/applications:
+    post:
+      tags: [Jobs]
+      summary: Queue applications CSV export
+      description: Student or company only. Email delivery uses SMTP (MailHog locally).
+      security: [{ BearerAuth: [] }]
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                delivery:
+                  type: string
+                  enum: [download, email, both]
+                  default: download
+      responses:
+        "202":
+          description: Queued
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TaskQueued" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /api/jobs/exports/{filename}:
+    get:
+      tags: [Jobs]
+      summary: Download finished export CSV
+      security: [{ BearerAuth: [] }]
+      parameters:
+        - name: filename
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: CSV file
+          content:
+            text/csv:
+              schema: { type: string, format: binary }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /api/jobs/admin/daily-reminders:
+    post:
+      tags: [Jobs]
+      summary: Queue daily deadline and interview reminder emails
+      security: [{ BearerAuth: [] }]
+      responses:
+        "202":
+          description: Queued
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TaskQueued" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /api/jobs/admin/monthly-report:
+    post:
+      tags: [Jobs]
+      summary: Queue monthly HTML activity report email
+      security: [{ BearerAuth: [] }]
+      responses:
+        "202":
+          description: Queued
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TaskQueued" }
+        "403": { $ref: "#/components/responses/Forbidden" }
